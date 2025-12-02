@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CV Generator (Left: Input — Right: Visualization)</title>
+  <style>
+    :root{ --bg:#f4f6f8; --card:#ffffff; --muted:#6b7280; --accent:#0f172a }
+    html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial}
+    .app{display:flex;gap:18px;height:100vh;padding:18px;background:linear-gradient(180deg,var(--bg),#eef2f7)}
+    .panel{background:var(--card);border-radius:10px;box-shadow:0 6px 18px rgba(12,14,20,0.06);padding:18px;overflow:auto}
+    .left{width:38%;min-width:320px;display:flex;flex-direction:column}
+    .right{flex:1;min-width:360px;display:flex;flex-direction:column}
+    textarea{width:100%;min-height:260px;padding:12px;border-radius:8px;border:1px solid #e6e9ee;resize:vertical;font-family:inherit}
+    label{font-weight:600;margin-bottom:8px;display:block}
+    .controls{display:flex;gap:10px;align-items:center;margin-top:12px}
+    .btn{padding:10px 14px;border-radius:8px;border:0;background:#0b74ff;color:white;font-weight:600;cursor:pointer}
+    .btn:disabled{opacity:.6;cursor:not-allowed}
+    .muted{color:var(--muted);font-size:13px}
+    .session{display:flex;gap:8px;align-items:center;margin-top:10px}
+    .session-id{background:#eef3ff;padding:6px 8px;border-radius:6px;font-family:monospace}
+    .status{margin-left:auto;font-size:13px}
+    .preview-wrapper{flex:1;border-radius:8px;border:1px dashed #e2e8f0;overflow:hidden;background:white;display:flex;flex-direction:column}
+    .preview-toolbar{display:flex;align-items:center;padding:8px 10px;border-bottom:1px solid #f1f5f9}
+    .preview-toolbar .muted{margin-right:10px}
+    iframe{border:0;width:100%;height:100%;display:block}
+    .error{color:#b91c1c;font-weight:600}
+    .small{font-size:13px}
+    .example-box{background:#fbfbff;padding:10px;border-radius:6px;border:1px solid #eef2ff;margin-top:12px;font-size:13px}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="panel left">
+      <h2>Prompt / CV details</h2>
+      <p class="muted">Write the candidate information, job title, skills, experience, or any instructions for the CV. The AI agent will return <strong>HTML code</strong> for the CV which will be rendered on the right side.</p>
+
+      <label for="prompt">Enter prompt (instructions or raw details)</label>
+      <textarea id="prompt" placeholder="Example: 'Create a one-page HTML CV for John Doe, software engineer, 5 years experience, skills: React, Node.js, SQL. Clean modern layout, 2 columns, include contact and projects.'"></textarea>
+
+      <div class="example-box">
+        <strong>Tip:</strong> You can paste multiple lines (education, work history, bullets). The webhook expects a payload with <code>sessionId</code> and <code>prompt</code>.
+      </div>
+
+      <div class="controls">
+        <button id="generateBtn" class="btn">Generate CV</button>
+        <div class="muted small">Webhook: <code>https://n8n.codepro-soft.com/webhook-test/resume</code></div>
+      </div>
+
+      <div class="session">
+        <div class="muted small">Session ID</div>
+        <div id="sessionId" class="session-id"></div>
+        <div class="status" id="status"></div>
+      </div>
+
+      <div style="margin-top:12px" class="muted small">How sessions work: a unique session id is generated and saved in your browser's <code>sessionStorage</code>. When you click <em>Generate</em> the page posts your <code>sessionId</code> together with the prompt so multiple users (or multiple tabs) get isolated CV responses.</div>
+
+      <hr style="margin:14px 0" />
+      <div class="muted small">Response preview metadata:</div>
+      <pre id="responseMeta" style="white-space:pre-wrap;background:#fbfcff;padding:10px;border-radius:6px;border:1px solid #eef2ff;margin-top:8px;min-height:80px"></pre>
+
+    </div>
+
+    <div class="panel right">
+      <div class="preview-wrapper">
+        <div class="preview-toolbar">
+          <div class="muted">CV Visualization (HTML)</div>
+          <div class="muted" style="margin-left:8px">— rendered from the webhook's returned HTML</div>
+          <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+            <button id="downloadHtml" class="btn" style="background:#10b981">Download HTML</button>
+            <div class="muted small">Render Mode:</div>
+            <select id="renderMode" class="small">
+              <option value="iframe">Iframe (safe)</option>
+              <option value="newtab">Open in new tab</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- iframe used to safely render returned HTML -->
+        <iframe id="previewFrame" sandbox="allow-scripts allow-same-origin"></iframe>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const WEBHOOK_URL = 'https://n8n.codepro-soft.com/webhook-test/resume';
+
+    function genUUID() {
+      // RFC4122 version 4 compliant UUID using crypto API
+      const buf = new Uint8Array(16);
+      crypto.getRandomValues(buf);
+      buf[6] = (buf[6] & 0x0f) | 0x40;
+      buf[8] = (buf[8] & 0x3f) | 0x80;
+      const toHex = (n) => n.toString(16).padStart(2, '0');
+      const parts = [
+        [...buf.slice(0,4)].map(toHex).join(''),
+        [...buf.slice(4,6)].map(toHex).join(''),
+        [...buf.slice(6,8)].map(toHex).join(''),
+        [...buf.slice(8,10)].map(toHex).join(''),
+        [...buf.slice(10,16)].map(toHex).join('')
+      ];
+      return parts.join('-');
+    }
+
+    function ensureSessionId(){
+      let sid = sessionStorage.getItem('cvSessionId');
+      if(!sid){ sid = genUUID(); sessionStorage.setItem('cvSessionId', sid); }
+      return sid;
+    }
+
+    // Initialize UI
+    const sessionEl = document.getElementById('sessionId');
+    const generateBtn = document.getElementById('generateBtn');
+    const promptEl = document.getElementById('prompt');
+    const statusEl = document.getElementById('status');
+    const previewFrame = document.getElementById('previewFrame');
+    const responseMeta = document.getElementById('responseMeta');
+    const downloadBtn = document.getElementById('downloadHtml');
+    const renderMode = document.getElementById('renderMode');
+
+    const sessionId = ensureSessionId();
+    sessionEl.textContent = sessionId;
+
+    async function postToWebhook(prompt, sid){
+      const payload = { sessionId: sid, prompt };
+
+      // Try sending JSON; server might respond with HTML text or JSON
+      try{
+        const res = await fetch(WEBHOOK_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          // mode: 'cors' // default
+        });
+
+        // Some webhooks reply with JSON { html: '<html>...</html>' }
+        const contentType = res.headers.get('content-type') || '';
+
+        if(contentType.includes('application/json')){
+          const j = await res.json();
+          // try fields
+          if(j.html) return { html: j.html, raw: j };
+          // fallback: maybe the whole JSON is the HTML
+          if(typeof j === 'string') return { html: j, raw: j };
+          return { html: JSON.stringify(j, null, 2), raw: j };
+        }
+
+        // if plain text or html
+        const text = await res.text();
+        // Heuristic: if starts with <, treat as HTML
+        if(text.trim().startsWith('<')) return { html: text, raw: text };
+        // otherwise return as text
+        return { html: text, raw: text };
+
+      }catch(err){
+        throw new Error('Network error / CORS / webhook unreachable — ' + err.message);
+      }
+    }
+
+    function renderHtmlInIframe(html){
+      // Use srcdoc if available
+      try{
+        previewFrame.srcdoc = html;
+      }catch(e){
+        // fallback write into iframe document
+        const doc = previewFrame.contentWindow.document;
+        doc.open(); doc.write(html); doc.close();
+      }
+    }
+
+    function setStatus(text, isError){ statusEl.textContent = text; statusEl.style.color = isError ? '#b91c1c' : '#0b74ff'; }
+
+    generateBtn.addEventListener('click', async ()=>{
+      const prompt = promptEl.value.trim();
+      if(!prompt){ alert('Please enter prompt / CV details in the left textarea.'); return; }
+
+      generateBtn.disabled = true; setStatus('Sending...'); responseMeta.textContent = '';
+
+      try{
+        const start = Date.now();
+        const result = await postToWebhook(prompt, sessionId);
+        const took = Date.now() - start;
+
+        // Show metadata
+        const meta = {sessionId, receivedAt: new Date().toISOString(), durationMs: took};
+        responseMeta.textContent = 'Response metadata:\n' + JSON.stringify(meta, null, 2) + '\n\nRaw response:\n' + (typeof result.raw === 'string' ? result.raw : JSON.stringify(result.raw, null, 2));
+
+        // If renderMode is newtab, open HTML in new tab; otherwise render in iframe
+        if(renderMode.value === 'newtab'){
+          const newWin = window.open();
+          newWin.document.write(result.html);
+          newWin.document.close();
+        }else{
+          renderHtmlInIframe(result.html);
+        }
+
+        setStatus('Success');
+      }catch(err){
+        responseMeta.textContent = 'Error: ' + err.message;
+        setStatus('Error', true);
+      }finally{
+        generateBtn.disabled = false;
+      }
+    });
+
+    downloadBtn.addEventListener('click', ()=>{
+      // get current preview html
+      let html = '';
+      try{ html = previewFrame.srcdoc || previewFrame.contentWindow.document.documentElement.outerHTML; }catch(e){ html = ''; }
+      if(!html){ alert('Nothing to download — generate a CV first.'); return; }
+      const blob = new Blob([html], {type:'text/html'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = `cv_${sessionId}.html`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    });
+
+    // Auto-load any previously returned HTML (optional): if your webhook provides a way to GET last response by sessionId
+    // This is commented out because it depends on server support. If your n8n workflow provides GET by sessionId,
+    // you can implement a fetch here to retrieve the last HTML automatically on page load.
+
+  </script>
+</body>
+</html>
